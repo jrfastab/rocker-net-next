@@ -149,6 +149,12 @@ enum {
 
 #define NFL_FIELD_MAX (__NFL_FIELD_MAX - 1)
 
+/* Max length supported by kernel name strings only the first n characters
+ * will be used by the kernel API. This is to prevent arbitrarily long
+ * strings being passed from user space.
+ */
+#define NFL_MAX_NAME 80
+
 enum {
 	NFL_FIELD_ATTR_UNSPEC,
 	NFL_FIELD_ATTR_NAME,
@@ -354,6 +360,44 @@ enum {
 #define NFL_NFL_MAX (__NFL_NFL_MAX - 1)
 
 enum {
+	NFL_TABLE_FLOWS_UNSPEC,
+	NFL_TABLE_FLOWS_TABLE,
+	NFL_TABLE_FLOWS_MINPRIO,
+	NFL_TABLE_FLOWS_MAXPRIO,
+	NFL_TABLE_FLOWS_FLOWS,
+	__NFL_TABLE_FLOWS_MAX,
+};
+
+#define NFL_TABLE_FLOWS_MAX (__NFL_TABLE_FLOWS_MAX - 1)
+
+enum {
+	/* Abort with normal errmsg */
+	NFL_FLOWS_ERROR_ABORT,
+	/* Ignore errors and continue without logging */
+	NFL_FLOWS_ERROR_CONTINUE,
+	/* Abort and reply with invalid flow fields */
+	NFL_FLOWS_ERROR_ABORT_LOG,
+	/* Continue and reply with list of invalid flows */
+	NFL_FLOWS_ERROR_CONT_LOG,
+	__NFLS_FLOWS_ERROR_MAX,
+};
+
+#define NFLS_FLOWS_ERROR_MAX (__NFLS_FLOWS_ERROR_MAX - 1)
+
+enum {
+	NFL_ATTR_UNSPEC,
+	NFL_ATTR_ERROR,
+	NFL_ATTR_TABLE,
+	NFL_ATTR_UID,
+	NFL_ATTR_PRIORITY,
+	NFL_ATTR_MATCHES,
+	NFL_ATTR_ACTIONS,
+	__NFL_ATTR_MAX,
+};
+
+#define NFL_ATTR_MAX (__NFL_ATTR_MAX - 1)
+
+enum {
 	NFL_IDENTIFIER_UNSPEC,
 	NFL_IDENTIFIER_IFINDEX, /* net_device ifindex */
 };
@@ -369,6 +413,9 @@ enum {
 	NFL_HEADER_GRAPH,
 	NFL_TABLE_GRAPH,
 
+	NFL_FLOWS,
+	NFL_FLOWS_ERROR,
+
 	__NFL_MAX,
 	NFL_MAX = (__NFL_MAX - 1),
 };
@@ -379,6 +426,10 @@ enum {
 	NFL_TABLE_CMD_GET_ACTIONS,
 	NFL_TABLE_CMD_GET_HDR_GRAPH,
 	NFL_TABLE_CMD_GET_TABLE_GRAPH,
+
+	NFL_TABLE_CMD_GET_FLOWS,
+	NFL_TABLE_CMD_SET_FLOWS,
+	NFL_TABLE_CMD_DEL_FLOWS,
 
 	__NFL_CMD_MAX,
 	NFL_CMD_MAX = (__NFL_CMD_MAX - 1),

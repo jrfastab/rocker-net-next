@@ -53,6 +53,10 @@
 #include <uapi/linux/netdevice.h>
 #include <uapi/linux/if_bonding.h>
 
+#ifdef CONFIG_NET_FLOW_TABLES
+#include <linux/if_flow.h>
+#endif
+
 struct netpoll_info;
 struct device;
 struct phy_device;
@@ -1030,6 +1034,21 @@ typedef u16 (*select_queue_fallback_t)(struct net_device *dev,
  *			     int queue_index, u32 maxrate);
  *	Called when a user wants to set a max-rate limitation of specific
  *	TX queue.
+ *
+ * int (*ndo_switch_parent_id_get)(struct net_device *dev,
+ *				   struct netdev_phys_item_id *psid);
+ *	Called to get an ID of the switch chip this port is part of.
+ *	If driver implements this, it indicates that it represents a port
+ *	of a switch chip.
+ * int (*ndo_switch_port_stp_update)(struct net_device *dev, u8 state);
+ *	Called to notify switch device port of bridge port STP
+ *	state change.
+ *
+ * int (*ndo_flow_set_rule)(struct net_device *dev, struct net_flow_rule *f)
+ *	This is used to program a rule into a device table.
+ *
+ * int (*ndo_flow_del_rule)(struct net_device *dev, struct net_flow_rule *f)
+ *	This is used to remove a rule from a device table.
  */
 struct net_device_ops {
 	int			(*ndo_init)(struct net_device *dev);
@@ -1191,6 +1210,18 @@ struct net_device_ops {
 	int			(*ndo_set_tx_maxrate)(struct net_device *dev,
 						      int queue_index,
 						      u32 maxrate);
+#ifdef CONFIG_NET_SWITCHDEV
+	int			(*ndo_switch_parent_id_get)(struct net_device *dev,
+							    struct netdev_phys_item_id *psid);
+	int			(*ndo_switch_port_stp_update)(struct net_device *dev,
+							      u8 state);
+#endif
+#ifdef CONFIG_NET_FLOW_TABLES
+	int		        (*ndo_flow_set_rule)(struct net_device *dev,
+						     struct net_flow_rule *f);
+	int		        (*ndo_flow_del_rule)(struct net_device *dev,
+						     struct net_flow_rule *f);
+#endif
 };
 
 /**

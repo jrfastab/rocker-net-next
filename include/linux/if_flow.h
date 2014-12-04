@@ -208,4 +208,24 @@ struct net_flow_switch_model {
 
 int register_flow_table(struct net_device *dev,
 			struct net_flow_switch_model *model);
-#endif
+int unregister_flow_table(struct net_device *dev);
+
+/**
+ * @struct net_flow_rule
+ * @brief describes the match/action entry
+ *
+ * @uid unique identifier for flow
+ * @priority priority to execute flow match/action in table
+ * @match null terminated set of match uids match criteria
+ * @action null terminated set of action uids to apply to match
+ *
+ * Flows must match all entries in match set.
+ */
+struct net_flow_rule {
+	__u32 table_id;
+	__u32 uid;
+	__u32 priority;
+	struct net_flow_field_ref *matches;
+	struct net_flow_action *actions;
+};
+#endif /* _IF_FLOW_H_ */
