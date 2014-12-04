@@ -293,6 +293,13 @@ config NET_FLOW_LIMIT
 	  with many clients some protection against DoS by a single (spoofed)
 	  flow that greatly exceeds average workload.
 
+config NET_FLOW_TABLES
+	bool "Support network flow tables"
+	---help---
+	This feature provides an interface for device drivers to report
+	flow tables and supported matches and actions. If you do not
+	want to support hardware offloads for flow tables, say N here.
+
 menu "Network testing"
 
 config NET_PKTGEN
