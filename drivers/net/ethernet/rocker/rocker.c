@@ -40,6 +40,7 @@
 #include <generated/utsrelease.h>
 
 #include "rocker.h"
+#include "rocker_pipeline.h"
 
 static const char rocker_driver_name[] = "rocker";
 
@@ -4201,6 +4202,31 @@ static int rocker_port_get_phys_port_name(struct net_device *dev,
 	return err ? -EOPNOTSUPP : 0;
 }
 
+static void rocker_destroy_flow_tables(struct rocker_port *rocker_port)
+{
+	int i;
+
+	for (i = 0; rocker_table_list[i]; i++)
+		net_flow_destroy_cache(rocker_table_list[i]);
+	unregister_flow_table(rocker_port->dev);
+}
+
+static int rocker_init_flow_tables(struct rocker_port *rocker_port)
+{
+	int i, err;
+
+	for (i = 0; rocker_table_list[i]; i++) {
+		err = net_flow_init_cache(rocker_table_list[i]);
+		if (err) {
+			rocker_destroy_flow_tables(rocker_port);
+			return err;
+		}
+	}
+
+	register_flow_table(rocker_port->dev, &rocker_flow_model);
+	return 0;
+}
+
 static const struct net_device_ops rocker_port_netdev_ops = {
 	.ndo_open			= rocker_port_open,
 	.ndo_stop			= rocker_port_stop,
@@ -4580,6 +4606,8 @@ static void rocker_remove_ports(struct rocker *rocker)
 	struct rocker_port *rocker_port;
 	int i;
 
+	rocker_destroy_flow_tables(rocker->ports[0]);
+
 	for (i = 0; i < rocker->port_count; i++) {
 		rocker_port = rocker->ports[i];
 		rocker_port_ig_tbl(rocker_port, ROCKER_OP_FLAG_REMOVE);
@@ -4663,7 +4691,7 @@ static int rocker_probe_ports(struct rocker *rocker)
 {
 	int i;
 	size_t alloc_size;
-	int err;
+	int err = 0;
 
 	alloc_size = sizeof(struct rocker_port *) * rocker->port_count;
 	rocker->ports = kmalloc(alloc_size, GFP_KERNEL);
@@ -4674,6 +4702,11 @@ static int rocker_probe_ports(struct rocker *rocker)
 		if (err)
 			goto remove_ports;
 	}
+
+	err = rocker_init_flow_tables(rocker->ports[0]);
+	if (err)
+		goto remove_ports;
+
 	return 0;
 
 remove_ports:
