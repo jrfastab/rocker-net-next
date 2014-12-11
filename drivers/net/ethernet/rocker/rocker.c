@@ -4227,6 +4227,416 @@ static int rocker_init_flow_tables(struct rocker_port *rocker_port)
 	return 0;
 }
 
+#ifdef CONFIG_NET_FLOW_TABLES
+static u32 rocker_goto_value(u32 id)
+{
+	switch (id) {
+	case ROCKER_FLOW_TABLE_ID_INGRESS_PORT:
+		return ROCKER_OF_DPA_TABLE_ID_INGRESS_PORT;
+	case ROCKER_FLOW_TABLE_ID_VLAN:
+		return ROCKER_OF_DPA_TABLE_ID_VLAN;
+	case ROCKER_FLOW_TABLE_ID_TERMINATION_MAC:
+		return ROCKER_OF_DPA_TABLE_ID_TERMINATION_MAC;
+	case ROCKER_FLOW_TABLE_ID_UNICAST_ROUTING:
+		return ROCKER_OF_DPA_TABLE_ID_UNICAST_ROUTING;
+	case ROCKER_FLOW_TABLE_ID_MULTICAST_ROUTING:
+		return ROCKER_OF_DPA_TABLE_ID_MULTICAST_ROUTING;
+	case ROCKER_FLOW_TABLE_ID_BRIDGING:
+		return ROCKER_OF_DPA_TABLE_ID_BRIDGING;
+	case ROCKER_FLOW_TABLE_ID_ACL_POLICY:
+		return ROCKER_OF_DPA_TABLE_ID_ACL_POLICY;
+	default:
+		return 0;
+	}
+}
+
+static int rocker_flow_set_ig_port(struct net_device *dev,
+				   struct net_flow_rule *rule)
+{
+	struct rocker_port *rocker_port = netdev_priv(dev);
+	enum rocker_of_dpa_table_id goto_tbl;
+	u32 in_pport_mask, in_pport;
+	int flags = 0;
+
+	/* ingress port table only supports one field/mask/action this
+	 * simplifies the key construction and we can assume the values
+	 * are the correct types/mask/action by valid check above. The
+	 * user could pass multiple match/actions in a message with the
+	 * same field multiple times currently the valid test does not
+	 * catch this and we just use the first specified.
+	 */
+	in_pport = rule->matches[0].value_u32;
+	in_pport_mask = rule->matches[0].mask_u32;
+	goto_tbl = rocker_goto_value(rule->actions[0].args[0].value_u16);
+
+	return rocker_flow_tbl_ig_port(rocker_port, flags,
+				       in_pport, in_pport_mask,
+				       goto_tbl);
+}
+
+static int rocker_flow_set_vlan(struct net_device *dev,
+				struct net_flow_rule *rule)
+{
+	struct rocker_port *rocker_port = netdev_priv(dev);
+	__be16 vlan_id, vlan_id_mask, new_vlan_id;
+	bool untagged, have_in_pport = false;
+	enum rocker_of_dpa_table_id goto_tbl;
+	int i, flags = 0;
+	u32 in_pport;
+
+	goto_tbl = ROCKER_OF_DPA_TABLE_ID_TERMINATION_MAC;
+
+	/* If user does not specify vid match default to any */
+	vlan_id = htons(1);
+	vlan_id_mask = 0;
+
+	for (i = 0; rule->matches && rule->matches[i].instance; i++) {
+		switch (rule->matches[i].instance) {
+		case ROCKER_HEADER_INSTANCE_INGRESS_LPORT:
+			in_pport = rule->matches[i].value_u32;
+			have_in_pport = true;
+			break;
+		case ROCKER_HEADER_INSTANCE_VLAN_OUTER:
+			if (rule->matches[i].field != HEADER_VLAN_VID)
+				break;
+
+			vlan_id = htons(rule->matches[i].value_u16);
+			vlan_id_mask = htons(rule->matches[i].mask_u16);
+			break;
+		default:
+			return -EINVAL;
+		}
+	}
+
+	if (!have_in_pport)
+		return -EINVAL;
+
+	/* If user does not specify a new vlan id use default vlan id */
+	new_vlan_id = rocker_port_vid_to_vlan(rocker_port, vlan_id, &untagged);
+
+	for (i = 0; rule->actions && rule->actions[i].uid; i++) {
+		struct net_flow_action_arg *arg = &rule->actions[i].args[0];
+
+		switch (rule->actions[i].uid) {
+		case ACTION_SET_VLAN_ID:
+			new_vlan_id = htons(arg->value_u16);
+			if (new_vlan_id)
+				untagged = false;
+			break;
+		}
+	}
+
+	return rocker_flow_tbl_vlan(rocker_port, flags, in_pport,
+				    vlan_id, vlan_id_mask, goto_tbl,
+				    untagged, new_vlan_id);
+}
+
+static int rocker_flow_set_term_mac(struct net_device *dev,
+				    struct net_flow_rule *rule)
+{
+	struct rocker_port *rocker_port = netdev_priv(dev);
+	__be16 vlan_id, vlan_id_mask, ethtype = 0;
+	const u8 *eth_dst, *eth_dst_mask;
+	u32 in_pport, in_pport_mask;
+	int i, flags = 0;
+	bool copy_to_cpu;
+
+	/* If user does not specify vid match default to any */
+	vlan_id = rocker_port->internal_vlan_id;
+	vlan_id_mask = 0;
+
+	/* If user does not specify in_pport match default to any */
+	in_pport = rocker_port->pport;
+	in_pport_mask = 0;
+
+	/* If user does not specify a mac address match any */
+	eth_dst = rocker_port->dev->dev_addr;
+	eth_dst_mask = zero_mac;
+
+	for (i = 0; rule->matches && rule->matches[i].instance; i++) {
+		switch (rule->matches[i].instance) {
+		case ROCKER_HEADER_INSTANCE_INGRESS_LPORT:
+			in_pport = rule->matches[i].value_u32;
+			in_pport_mask = rule->matches[i].mask_u32;
+			break;
+		case ROCKER_HEADER_INSTANCE_VLAN_OUTER:
+			if (rule->matches[i].field != HEADER_VLAN_VID)
+				break;
+
+			vlan_id = htons(rule->matches[i].value_u16);
+			vlan_id_mask = htons(rule->matches[i].mask_u16);
+			break;
+		case ROCKER_HEADER_INSTANCE_ETHERNET:
+			switch (rule->matches[i].field) {
+			case HEADER_ETHERNET_DST_MAC:
+				eth_dst = (u8 *)&rule->matches[i].value_u64;
+				eth_dst_mask = (u8 *)&rule->matches[i].mask_u64;
+				break;
+			case HEADER_ETHERNET_ETHERTYPE:
+				ethtype = htons(rule->matches[i].value_u16);
+				break;
+			default:
+				return -EINVAL;
+			}
+			break;
+		default:
+			return -EINVAL;
+		}
+	}
+
+	if (!ethtype)
+		return -EINVAL;
+
+	/* By default do not copy to cpu */
+	copy_to_cpu = false;
+
+	for (i = 0; rule->actions && rule->actions[i].uid; i++) {
+		switch (rule->actions[i].uid) {
+		case ACTION_COPY_TO_CPU:
+			copy_to_cpu = true;
+			break;
+		default:
+			return -EINVAL;
+		}
+	}
+
+	return rocker_flow_tbl_term_mac(rocker_port, in_pport, in_pport_mask,
+					ethtype, eth_dst, eth_dst_mask,
+					vlan_id, vlan_id_mask,
+					copy_to_cpu, flags);
+}
+
+static int rocker_flow_set_ucast_routing(struct net_device *dev,
+					 struct net_flow_rule *rule)
+{
+	return -EOPNOTSUPP;
+}
+
+static int rocker_flow_set_mcast_routing(struct net_device *dev,
+					 struct net_flow_rule *rule)
+{
+	return -EOPNOTSUPP;
+}
+
+static int rocker_flow_set_bridge(struct net_device *dev,
+				  struct net_flow_rule *rule)
+{
+	enum rocker_of_dpa_table_id goto_tbl;
+	struct rocker_port *rocker_port = netdev_priv(dev);
+	u32 in_pport, in_pport_mask, group_id, tunnel_id;
+	__be16 vlan_id, vlan_id_mask;
+	const u8 *eth_dst, *eth_dst_mask;
+	int i, flags = 0;
+	bool copy_to_cpu;
+
+	goto_tbl = ROCKER_OF_DPA_TABLE_ID_ACL_POLICY;
+
+	/* If user does not specify vid match default to any */
+	vlan_id = rocker_port->internal_vlan_id;
+	vlan_id_mask = 0;
+
+	/* If user does not specify in_pport match default to any */
+	in_pport = rocker_port->pport;
+	in_pport_mask = 0;
+
+	/* If user does not specify a mac address match any */
+	eth_dst = rocker_port->dev->dev_addr;
+	eth_dst_mask = NULL;
+
+	/* Do not support for tunnel_id yet. */
+	tunnel_id = 0;
+
+	for (i = 0; rule->matches && rule->matches[i].instance; i++) {
+		switch (rule->matches[i].instance) {
+		case ROCKER_HEADER_INSTANCE_INGRESS_LPORT:
+			in_pport = rule->matches[i].value_u32;
+			in_pport_mask = rule->matches[i].mask_u32;
+			break;
+		case ROCKER_HEADER_INSTANCE_VLAN_OUTER:
+			if (rule->matches[i].field != HEADER_VLAN_VID)
+				break;
+
+			vlan_id = htons(rule->matches[i].value_u16);
+			vlan_id_mask = htons(rule->matches[i].mask_u16);
+			break;
+		case ROCKER_HEADER_INSTANCE_ETHERNET:
+			switch (rule->matches[i].field) {
+			case HEADER_ETHERNET_DST_MAC:
+				eth_dst = (u8 *)&rule->matches[i].value_u64;
+				eth_dst_mask = (u8 *)&rule->matches[i].mask_u64;
+				break;
+			default:
+				return -EINVAL;
+			}
+			break;
+		default:
+			return -EINVAL;
+		}
+	}
+
+	/* By default do not copy to cpu and skip group assignment */
+	copy_to_cpu = false;
+	group_id = ROCKER_GROUP_NONE;
+
+	for (i = 0; rule->actions && rule->actions[i].uid; i++) {
+		switch (rule->actions[i].uid) {
+		case ACTION_COPY_TO_CPU:
+			copy_to_cpu = true;
+			break;
+		default:
+			return -EINVAL;
+		}
+	}
+
+	/* Ignoring eth_dst_mask it seems to cause a EINVAL return code */
+	return rocker_flow_tbl_bridge(rocker_port, flags,
+				      eth_dst, eth_dst_mask,
+				      vlan_id, tunnel_id,
+				      goto_tbl, group_id, copy_to_cpu);
+}
+
+static int rocker_flow_set_acl(struct net_device *dev,
+			       struct net_flow_rule *rule)
+{
+	struct rocker_port *rocker_port = netdev_priv(dev);
+	u32 in_pport, in_pport_mask, group_id, tunnel_id;
+	__be16 vlan_id, vlan_id_mask, ethtype = 0;
+	const u8 *eth_dst, *eth_src, *eth_dst_mask, *eth_src_mask;
+	u8 protocol, protocol_mask, dscp, dscp_mask;
+	int i, flags = 0;
+
+	/* If user does not specify vid match default to any */
+	vlan_id = rocker_port->internal_vlan_id;
+	vlan_id_mask = 0;
+
+	/* If user does not specify in_pport match default to any */
+	in_pport = rocker_port->pport;
+	in_pport_mask = 0;
+
+	/* If user does not specify a mac address match any */
+	eth_dst = rocker_port->dev->dev_addr;
+	eth_src = zero_mac;
+	eth_dst_mask = NULL;
+	eth_src_mask = NULL;
+
+	/* If user does not set protocol/dscp mask them out */
+	protocol = 0;
+	dscp = 0;
+	protocol_mask = 0;
+	dscp_mask = 0;
+
+	/* Do not support for tunnel_id yet. */
+	tunnel_id = 0;
+
+	for (i = 0; rule->matches && rule->matches[i].instance; i++) {
+		switch (rule->matches[i].instance) {
+		case ROCKER_HEADER_INSTANCE_INGRESS_LPORT:
+			in_pport = rule->matches[i].value_u32;
+			in_pport_mask = rule->matches[i].mask_u32;
+			break;
+		case ROCKER_HEADER_INSTANCE_VLAN_OUTER:
+			if (rule->matches[i].field != HEADER_VLAN_VID)
+				break;
+
+			vlan_id = htons(rule->matches[i].value_u16);
+			vlan_id_mask = htons(rule->matches[i].mask_u16);
+			break;
+		case ROCKER_HEADER_INSTANCE_ETHERNET:
+			switch (rule->matches[i].field) {
+			case HEADER_ETHERNET_SRC_MAC:
+				eth_src = (u8 *)&rule->matches[i].value_u64;
+				eth_src_mask = (u8 *)&rule->matches[i].mask_u64;
+				break;
+			case HEADER_ETHERNET_DST_MAC:
+				eth_dst = (u8 *)&rule->matches[i].value_u64;
+				eth_dst_mask = (u8 *)&rule->matches[i].mask_u64;
+				break;
+			case HEADER_ETHERNET_ETHERTYPE:
+				ethtype = htons(rule->matches[i].value_u16);
+				break;
+			default:
+				return -EINVAL;
+			}
+			break;
+		case ROCKER_HEADER_INSTANCE_IPV4:
+			switch (rule->matches[i].field) {
+			case HEADER_IPV4_PROTOCOL:
+				protocol = rule->matches[i].value_u8;
+				protocol_mask = rule->matches[i].mask_u8;
+				break;
+			case HEADER_IPV4_DSCP:
+				dscp = rule->matches[i].value_u8;
+				dscp_mask = rule->matches[i].mask_u8;
+				break;
+			default:
+				return -EINVAL;
+			}
+		default:
+			return -EINVAL;
+		}
+	}
+
+	/* By default do not copy to cpu and skip group assignment */
+	group_id = ROCKER_GROUP_NONE;
+
+	for (i = 0; rule->actions && rule->actions[i].uid; i++) {
+		switch (rule->actions[i].uid) {
+		default:
+			return -EINVAL;
+		}
+	}
+
+	return rocker_flow_tbl_acl(rocker_port, flags,
+				   in_pport, in_pport_mask,
+				   eth_src, eth_src_mask,
+				   eth_dst, eth_dst_mask, ethtype,
+				   vlan_id, vlan_id_mask,
+				   protocol, protocol_mask,
+				   dscp, dscp_mask,
+				   group_id);
+}
+
+static int rocker_set_rules(struct net_device *dev,
+			    struct net_flow_rule *rule)
+{
+	int err = -EINVAL;
+
+	switch (rule->table_id) {
+	case ROCKER_FLOW_TABLE_ID_INGRESS_PORT:
+		err = rocker_flow_set_ig_port(dev, rule);
+		break;
+	case ROCKER_FLOW_TABLE_ID_VLAN:
+		err = rocker_flow_set_vlan(dev, rule);
+		break;
+	case ROCKER_FLOW_TABLE_ID_TERMINATION_MAC:
+		err = rocker_flow_set_term_mac(dev, rule);
+		break;
+	case ROCKER_FLOW_TABLE_ID_UNICAST_ROUTING:
+		err = rocker_flow_set_ucast_routing(dev, rule);
+		break;
+	case ROCKER_FLOW_TABLE_ID_MULTICAST_ROUTING:
+		err = rocker_flow_set_mcast_routing(dev, rule);
+		break;
+	case ROCKER_FLOW_TABLE_ID_BRIDGING:
+		err = rocker_flow_set_bridge(dev, rule);
+		break;
+	case ROCKER_FLOW_TABLE_ID_ACL_POLICY:
+		err = rocker_flow_set_acl(dev, rule);
+		break;
+	default:
+		break;
+	}
+
+	return err;
+}
+
+static int rocker_del_rules(struct net_device *dev,
+			    struct net_flow_rule *rule)
+{
+	return -EOPNOTSUPP;
+}
+#endif
+
 static const struct net_device_ops rocker_port_netdev_ops = {
 	.ndo_open			= rocker_port_open,
 	.ndo_stop			= rocker_port_stop,
@@ -4240,6 +4650,10 @@ static const struct net_device_ops rocker_port_netdev_ops = {
 	.ndo_bridge_setlink		= rocker_port_bridge_setlink,
 	.ndo_bridge_getlink		= rocker_port_bridge_getlink,
 	.ndo_get_phys_port_name		= rocker_port_get_phys_port_name,
+#ifdef CONFIG_NET_FLOW_TABLES
+	.ndo_flow_set_rule		= rocker_set_rules,
+	.ndo_flow_del_rule		= rocker_del_rules,
+#endif
 };
 
 /********************

@@ -338,6 +338,14 @@ struct net_flow_tbl_node rocker_table_node_vlan = {
 	.jump = rocker_table_node_vlan_next};
 
 struct net_flow_jump_table rocker_table_node_term_mac_next[] = {
+	{ .field = {.instance = ROCKER_HEADER_INSTANCE_ETHERNET,
+		    .header = HEADER_ETHERNET,
+		    .field = HEADER_ETHERNET_DST_MAC,
+		    .mask_type = NFL_MASK_TYPE_LPM,
+		    .type = NFL_FIELD_REF_ATTR_TYPE_U64,
+		    .value_u64 = (__u64)0x1,
+		    .mask_u64 = (__u64)0x1,
+	}, .node = ROCKER_FLOW_TABLE_ID_BRIDGING},
 	{ .field = {0}, .node = ROCKER_FLOW_TABLE_ID_UNICAST_ROUTING},
 	{ .field = {0}, .node = 0},
 };
