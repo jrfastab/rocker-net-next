@@ -4337,7 +4337,7 @@ static int rocker_flow_set_term_mac(struct net_device *dev,
 	struct rocker_port *rocker_port = netdev_priv(dev);
 	__be16 vlan_id, vlan_id_mask, ethtype = 0;
 	const u8 *eth_dst, *eth_dst_mask;
-	u32 in_pport, in_pport_mask;
+	u32 in_pport, in_pport_mask, group_id;
 	int i, flags = 0;
 	bool copy_to_cpu;
 
@@ -4392,8 +4392,14 @@ static int rocker_flow_set_term_mac(struct net_device *dev,
 
 	for (i = 0; rule->actions && rule->actions[i].uid; i++) {
 		switch (rule->actions[i].uid) {
+			struct net_flow_action_arg *arg;
+
 		case ACTION_COPY_TO_CPU:
 			copy_to_cpu = true;
+			break;
+		case ROCKER_ACTION_SET_L3_UNICAST_GID:
+ 			arg = &rule->actions[i].args[0];
+			group_id = ROCKER_GROUP_L3_UNICAST(arg->value_u32);
 			break;
 		default:
 			return -EINVAL;
@@ -4580,7 +4586,12 @@ static int rocker_flow_set_acl(struct net_device *dev,
 	group_id = ROCKER_GROUP_NONE;
 
 	for (i = 0; rule->actions && rule->actions[i].uid; i++) {
+		struct net_flow_action_arg *arg = &rule->actions[i].args[0];
+
 		switch (rule->actions[i].uid) {
+		case ROCKER_ACTION_SET_L3_UNICAST_GID:
+			group_id = ROCKER_GROUP_L3_UNICAST(arg->value_u32);
+			break;
 		default:
 			return -EINVAL;
 		}
@@ -4594,6 +4605,158 @@ static int rocker_flow_set_acl(struct net_device *dev,
 				   protocol, protocol_mask,
 				   dscp, dscp_mask,
 				   group_id);
+}
+
+static int rocker_flow_set_group_slice_l3_unicast(struct net_device *dev,
+						  struct net_flow_rule *rule)
+{
+	struct rocker_port *rocker_port = netdev_priv(dev);
+	struct rocker_group_tbl_entry *entry;
+	int i, flags = 0;
+
+	entry = kzalloc(sizeof(*entry), rocker_op_flags_gfp(flags));
+	if (!entry)
+		return -ENOMEM;
+
+	for (i = 0; rule->matches && rule->matches[i].instance; i++) {
+		struct net_flow_field_ref *r = &rule->matches[i];
+
+		switch (r->instance) {
+		case ROCKER_HEADER_INSTANCE_L3_UNICAST_GID:
+			entry->group_id = ROCKER_GROUP_L3_UNICAST(r->value_u32);
+			break;
+		default:
+			return -EINVAL;
+		}
+	}
+
+	for (i = 0; rule->actions && rule->actions[i].uid; i++) {
+		struct net_flow_action_arg *arg = &rule->actions[i].args[0];
+
+		switch (rule->actions[i].uid) {
+		case ACTION_SET_ETH_SRC:
+			ether_addr_copy(entry->l3_unicast.eth_src,
+					(u8 *)&arg->value_u64);
+			break;
+		case ACTION_SET_ETH_DST:
+			ether_addr_copy(entry->l3_unicast.eth_dst,
+					(u8 *)&arg->value_u64);
+			break;
+		case ACTION_SET_VLAN_ID:
+			entry->l3_unicast.vlan_id = htons(arg->value_u16);
+			break;
+		case ACTION_CHECK_TTL_DROP:
+			entry->l3_unicast.ttl_check = true;
+			break;
+		case ROCKER_ACTION_SET_L2_REWRITE_GID:
+			entry->l3_unicast.group_id =
+				ROCKER_GROUP_L2_REWRITE(arg->value_u32);
+			break;
+		default:
+			return -EINVAL;
+		}
+	}
+
+	return rocker_group_tbl_do(rocker_port, flags, entry);
+}
+
+static int rocker_flow_set_group_slice_l2_rewrite(struct net_device *dev,
+						  struct net_flow_rule *rule)
+{
+	struct rocker_port *rocker_port = netdev_priv(dev);
+	struct rocker_group_tbl_entry *entry;
+	int i, flags = 0;
+
+	entry = kzalloc(sizeof(*entry), rocker_op_flags_gfp(flags));
+	if (!entry)
+		return -ENOMEM;
+
+	for (i = 0; rule->matches && rule->matches[i].instance; i++) {
+		struct net_flow_field_ref *r = &rule->matches[i];
+
+		switch (r->instance) {
+		case ROCKER_HEADER_INSTANCE_L2_REWRITE_GID:
+			entry->group_id = ROCKER_GROUP_L2_REWRITE(r->value_u32);
+			break;
+		default:
+			return -EINVAL;
+		}
+	}
+
+	for (i = 0; rule->actions && rule->actions[i].uid; i++) {
+		struct net_flow_action_arg *arg = &rule->actions[i].args[0];
+
+		switch (rule->actions[i].uid) {
+		case ACTION_SET_ETH_SRC:
+			ether_addr_copy(entry->l2_rewrite.eth_src,
+					(u8 *)&arg->value_u64);
+			break;
+		case ACTION_SET_ETH_DST:
+			ether_addr_copy(entry->l2_rewrite.eth_dst,
+					(u8 *)&arg->value_u64);
+			break;
+		case ACTION_SET_VLAN_ID:
+			entry->l2_rewrite.vlan_id = htons(arg->value_u16);
+			break;
+		case ROCKER_ACTION_SET_L2_GID:
+			entry->l2_rewrite.group_id =
+				ROCKER_GROUP_L2_INTERFACE(arg->value_u32,
+							  rocker_port->pport);
+			break;
+		default:
+			return -EINVAL;
+		}
+	}
+
+	return rocker_group_tbl_do(rocker_port, flags, entry);
+}
+
+static int rocker_flow_set_group_slice_l2(struct net_device *dev,
+					  struct net_flow_rule *rule)
+{
+	struct rocker_port *rocker_port = netdev_priv(dev);
+	struct rocker_group_tbl_entry *entry;
+	int i, flags = 0;
+	u32 pport;
+
+	entry = kzalloc(sizeof(*entry), rocker_op_flags_gfp(flags));
+	if (!entry)
+		return -ENOMEM;
+
+	pport = rocker_port->pport;
+
+	/* Use the dev pport if we don't have a specified pport instance
+	 * from the user. We need to walk the list once before to extract
+	 * any pport attribute.
+	 */
+	for (i = 0; rule->matches && rule->matches[i].instance; i++) {
+		switch (rule->matches[i].instance) {
+		case ROCKER_HEADER_INSTANCE_INGRESS_LPORT:
+			pport = rule->matches[i].value_u32;
+		}
+	}
+
+	for (i = 0; rule->matches && rule->matches[i].instance; i++) {
+		struct net_flow_field_ref *r = &rule->matches[i];
+
+		switch (r->instance) {
+		case ROCKER_HEADER_INSTANCE_L2_GID:
+			entry->group_id =
+				ROCKER_GROUP_L2_INTERFACE(r->value_u32, pport);
+			break;
+		default:
+			return -EINVAL;
+		}
+	}
+
+	for (i = 0; rule->actions && rule->actions[i].uid; i++) {
+		switch (rule->actions[i].uid) {
+		default:
+			return -EINVAL;
+		}
+	}
+
+	return rocker_group_tbl_do(rocker_port, flags, entry);
 }
 
 static int rocker_set_rules(struct net_device *dev,
@@ -4622,6 +4785,15 @@ static int rocker_set_rules(struct net_device *dev,
 		break;
 	case ROCKER_FLOW_TABLE_ID_ACL_POLICY:
 		err = rocker_flow_set_acl(dev, rule);
+		break;
+	case ROCKER_FLOW_TABLE_ID_GROUP_SLICE_L3_UNICAST:
+		err = rocker_flow_set_group_slice_l3_unicast(dev, rule);
+		break;
+	case ROCKER_FLOW_TABLE_ID_GROUP_SLICE_L2_REWRITE:
+		err = rocker_flow_set_group_slice_l2_rewrite(dev, rule);
+		break;
+	case ROCKER_FLOW_TABLE_ID_GROUP_SLICE_L2:
+		err = rocker_flow_set_group_slice_l2(dev, rule);
 		break;
 	default:
 		break;

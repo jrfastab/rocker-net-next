@@ -19,15 +19,7 @@ struct net_flow_hdr *rocker_header_list[] = {
 	&net_flow_vlan,
 	&net_flow_ipv4,
 	&net_flow_metadata_t,
-	NULL,
-};
-
-struct net_flow_action *rocker_action_list[] = {
-	&net_flow_set_vlan_id,
-	&net_flow_copy_to_cpu,
-	&net_flow_set_eth_src,
-	&net_flow_set_eth_dst,
-	&net_flow_check_ttl_drop,
+	&net_flow_metadata_inter_table_t,
 	NULL,
 };
 
@@ -38,6 +30,9 @@ enum rocker_header_instance_ids {
 	ROCKER_HEADER_INSTANCE_VLAN_OUTER,
 	ROCKER_HEADER_INSTANCE_IPV4,
 	ROCKER_HEADER_INSTANCE_INGRESS_LPORT,
+	ROCKER_HEADER_INSTANCE_L3_UNICAST_GID,
+	ROCKER_HEADER_INSTANCE_L2_REWRITE_GID,
+	ROCKER_HEADER_INSTANCE_L2_GID,
 };
 
 struct net_flow_jump_table rocker_parse_ethernet[] = {
@@ -125,11 +120,89 @@ struct net_flow_hdr_node rocker_in_lport_header_node = {
 	.jump = rocker_terminal_headers,
 };
 
+int rocker_metadata_inter_table[] = {HEADER_METADATA_INTER_TABLE, 0};
+struct net_flow_hdr_node rocker_l2_group_id_header_node = {
+	.name = "l2_group_id",
+	.uid = ROCKER_HEADER_INSTANCE_L2_GID,
+	.hdrs = rocker_metadata_inter_table,
+	.jump = rocker_terminal_headers,
+};
+
+struct net_flow_hdr_node rocker_l2_rewrite_group_id_header_node = {
+	.name = "l2_rewrite_group_id",
+	.uid = ROCKER_HEADER_INSTANCE_L2_REWRITE_GID,
+	.hdrs = rocker_metadata_inter_table,
+	.jump = rocker_terminal_headers,
+};
+
+struct net_flow_hdr_node rocker_l3_unicast_group_id_header_node = {
+	.name = "l3_uniscast_group_id",
+	.uid = ROCKER_HEADER_INSTANCE_L3_UNICAST_GID,
+	.hdrs = rocker_metadata_inter_table,
+	.jump = rocker_terminal_headers,
+};
+
 struct net_flow_hdr_node *rocker_header_nodes[] = {
 	&rocker_ethernet_header_node,
 	&rocker_vlan_header_node,
 	&rocker_ipv4_header_node,
 	&rocker_in_lport_header_node,
+	&rocker_l3_unicast_group_id_header_node,
+	&rocker_l2_rewrite_group_id_header_node,
+	&rocker_l2_group_id_header_node,
+	NULL,
+};
+
+/* rocker specific action definitions */
+struct net_flow_action_arg rocker_set_group_id_args[] = {
+	{
+		.name = "group_id",
+		.type = NFL_ACTION_ARG_TYPE_U32,
+		.value_u32 = 0,
+	},
+	{
+		.name = "",
+		.type = NFL_ACTION_ARG_TYPE_NULL,
+	},
+};
+
+enum rocker_action_ids {
+	ROCKER_ACTION_UNSPEC = __ACTION_MAX,
+	ROCKER_ACTION_SET_L3_UNICAST_GID,
+	ROCKER_ACTION_SET_L2_REWRITE_GID,
+	ROCKER_ACTION_SET_L2_GID,
+};
+
+struct net_flow_action rocker_set_l3_unicast_group_id = {
+	.name = "set_l3_unicast_group_id",
+	.uid = ROCKER_ACTION_SET_L3_UNICAST_GID,
+	.instance = ROCKER_HEADER_INSTANCE_L3_UNICAST_GID,
+	.args = rocker_set_group_id_args,
+};
+
+struct net_flow_action rocker_set_l2_rewrite_group_id = {
+	.name = "set_l2_rewrite_group_id",
+	.uid = ROCKER_ACTION_SET_L2_REWRITE_GID,
+	.instance = ROCKER_HEADER_INSTANCE_L2_REWRITE_GID,
+	.args = rocker_set_group_id_args,
+};
+
+struct net_flow_action rocker_set_l2_group_id = {
+	.name = "set_l2_group_id",
+	.uid = ROCKER_ACTION_SET_L2_GID,
+	.instance = ROCKER_HEADER_INSTANCE_L2_GID,
+	.args = rocker_set_group_id_args,
+};
+
+struct net_flow_action *rocker_action_list[] = {
+	&net_flow_set_vlan_id,
+	&net_flow_copy_to_cpu,
+	&net_flow_set_eth_src,
+	&net_flow_set_eth_dst,
+	&net_flow_check_ttl_drop,
+	&rocker_set_l3_unicast_group_id,
+	&rocker_set_l2_rewrite_group_id,
+	&rocker_set_l2_group_id,
 	NULL,
 };
 
@@ -230,12 +303,48 @@ struct net_flow_field_ref rocker_matches_acl[] = {
 	{ .instance = 0, .field = 0},
 };
 
+struct net_flow_field_ref rocker_matches_l3_unicast_group_slice[2] = {
+	{ .instance = ROCKER_HEADER_INSTANCE_L3_UNICAST_GID,
+	  .header = HEADER_METADATA_INTER_TABLE,
+	  .field = HEADER_METADATA_INTER_TABLE_FIELD,
+	  .mask_type = NFL_MASK_TYPE_EXACT},
+	{ .instance = 0, .field = 0},
+};
+
+struct net_flow_field_ref rocker_matches_l2_rewrite_group_slice[2] = {
+	{ .instance = ROCKER_HEADER_INSTANCE_L2_REWRITE_GID,
+	  .header = HEADER_METADATA_INTER_TABLE,
+	  .field = HEADER_METADATA_INTER_TABLE_FIELD,
+	  .mask_type = NFL_MASK_TYPE_EXACT},
+	{ .instance = 0, .field = 0},
+};
+
+struct net_flow_field_ref rocker_matches_l2_group_slice[2] = {
+	{ .instance = ROCKER_HEADER_INSTANCE_L2_GID,
+	  .header = HEADER_METADATA_INTER_TABLE,
+	  .field = HEADER_METADATA_INTER_TABLE_FIELD,
+	  .mask_type = NFL_MASK_TYPE_EXACT},
+	{ .instance = 0, .field = 0},
+};
+
 int rocker_actions_ig_port[] = {0};
 int rocker_actions_vlan[] = {ACTION_SET_VLAN_ID, 0};
 int rocker_actions_term_mac[] = {ACTION_COPY_TO_CPU, 0};
-int rocker_actions_ucast_routing[] = {0};
-int rocker_actions_bridge[] = {ACTION_COPY_TO_CPU, 0};
-int rocker_actions_acl[] = {0};
+int rocker_actions_ucast_routing[] = {ROCKER_ACTION_SET_L3_UNICAST_GID, 0};
+int rocker_actions_bridge[] = {ROCKER_ACTION_SET_L3_UNICAST_GID,
+			       ACTION_COPY_TO_CPU, 0};
+int rocker_actions_acl[] = {ROCKER_ACTION_SET_L3_UNICAST_GID, 0};
+int rocker_actions_group_slice_l3_unicast[] = {ACTION_SET_ETH_SRC,
+					       ACTION_SET_ETH_DST,
+					       ACTION_SET_VLAN_ID,
+					       ROCKER_ACTION_SET_L2_REWRITE_GID,
+					       ACTION_CHECK_TTL_DROP, 0};
+int rocker_actions_group_slice_l2_rewrite[] = {ACTION_SET_ETH_SRC,
+					       ACTION_SET_ETH_DST,
+					       ACTION_SET_VLAN_ID,
+					       ROCKER_ACTION_SET_L2_GID,
+					       0};
+int rocker_actions_group_slice_l2[] = {0};
 
 enum rocker_flow_table_id_space {
 	ROCKER_FLOW_TABLE_NULL,
@@ -246,6 +355,9 @@ enum rocker_flow_table_id_space {
 	ROCKER_FLOW_TABLE_ID_MULTICAST_ROUTING,
 	ROCKER_FLOW_TABLE_ID_BRIDGING,
 	ROCKER_FLOW_TABLE_ID_ACL_POLICY,
+	ROCKER_FLOW_TABLE_ID_GROUP_SLICE_L3_UNICAST,
+	ROCKER_FLOW_TABLE_ID_GROUP_SLICE_L2_REWRITE,
+	ROCKER_FLOW_TABLE_ID_GROUP_SLICE_L2,
 };
 
 struct net_flow_tbl rocker_ingress_port_table = {
@@ -308,6 +420,33 @@ struct net_flow_tbl rocker_acl_table = {
 	.cache = {0},
 };
 
+struct net_flow_tbl rocker_group_slice_l3_unicast_table = {
+	.name = "group_slice_l3_unicast",
+	.uid = ROCKER_FLOW_TABLE_ID_GROUP_SLICE_L3_UNICAST,
+	.source = 1,
+	.size = -1,
+	.matches = rocker_matches_l3_unicast_group_slice,
+	.actions = rocker_actions_group_slice_l3_unicast,
+};
+
+struct net_flow_tbl rocker_group_slice_l2_rewrite_table = {
+	.name = "group_slice_l2_rewrite",
+	.uid = ROCKER_FLOW_TABLE_ID_GROUP_SLICE_L2_REWRITE,
+	.source = 1,
+	.size = -1,
+	.matches = rocker_matches_l2_rewrite_group_slice,
+	.actions = rocker_actions_group_slice_l2_rewrite,
+};
+
+struct net_flow_tbl rocker_group_slice_l2_table = {
+	.name = "group_slice_l2",
+	.uid = ROCKER_FLOW_TABLE_ID_GROUP_SLICE_L2,
+	.source = 1,
+	.size = -1,
+	.matches = rocker_matches_l2_group_slice,
+	.actions = rocker_actions_group_slice_l2,
+};
+
 struct net_flow_tbl *rocker_table_list[] = {
 	&rocker_ingress_port_table,
 	&rocker_vlan_table,
@@ -315,6 +454,9 @@ struct net_flow_tbl *rocker_table_list[] = {
 	&rocker_ucast_routing_table,
 	&rocker_bridge_table,
 	&rocker_acl_table,
+	&rocker_group_slice_l3_unicast_table,
+	&rocker_group_slice_l2_rewrite_table,
+	&rocker_group_slice_l2_table,
 	NULL,
 };
 
@@ -373,12 +515,39 @@ struct net_flow_tbl_node rocker_table_node_ucast_routing = {
 	.jump = rocker_table_node_ucast_routing_next};
 
 struct net_flow_jump_table rocker_table_node_acl_next[] = {
+	{ .field = {0}, .node = ROCKER_FLOW_TABLE_ID_GROUP_SLICE_L3_UNICAST},
 	{ .field = {0}, .node = 0},
 };
 
 struct net_flow_tbl_node rocker_table_node_acl = {
 	.uid = ROCKER_FLOW_TABLE_ID_ACL_POLICY,
 	.jump = rocker_table_node_acl_next};
+
+struct net_flow_jump_table rocker_table_node_group_l3_unicast_next[1] = {
+	{ .field = {0}, .node = ROCKER_FLOW_TABLE_ID_GROUP_SLICE_L2_REWRITE},
+};
+
+struct net_flow_tbl_node rocker_table_node_group_l3_unicast = {
+	.uid = ROCKER_FLOW_TABLE_ID_GROUP_SLICE_L3_UNICAST,
+	.jump = rocker_table_node_group_l3_unicast_next};
+
+struct net_flow_jump_table rocker_table_node_group_l2_rewrite_next[1] = {
+	{ .field = {0}, .node = ROCKER_FLOW_TABLE_ID_GROUP_SLICE_L2},
+};
+
+struct net_flow_tbl_node rocker_table_node_group_l2_rewrite = {
+	.uid = ROCKER_FLOW_TABLE_ID_GROUP_SLICE_L2_REWRITE,
+	.jump = rocker_table_node_group_l2_rewrite_next};
+
+struct net_flow_jump_table rocker_table_node_group_l2_next[1] = {
+	{ .field = {0}, .node = 0},
+};
+
+struct net_flow_tbl_node rocker_table_node_group_l2 = {
+	.uid = ROCKER_FLOW_TABLE_ID_GROUP_SLICE_L2,
+	.jump = rocker_table_node_group_l2_next};
+
+struct net_flow_tbl_node rocker_table_node_nil = {.uid = 0, .jump = NULL};
 
 struct net_flow_tbl_node *rocker_table_nodes[] = {
 	&rocker_table_node_ingress_port,
@@ -387,7 +556,10 @@ struct net_flow_tbl_node *rocker_table_nodes[] = {
 	&rocker_table_node_ucast_routing,
 	&rocker_table_node_bridge,
 	&rocker_table_node_acl,
-	NULL,
+	&rocker_table_node_group_l3_unicast,
+	&rocker_table_node_group_l2_rewrite,
+	&rocker_table_node_group_l2,
+	NULL
 };
 
 struct net_flow_switch_model rocker_flow_model = {
