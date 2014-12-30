@@ -125,6 +125,7 @@ struct rocker_flow_tbl_entry {
 
 struct rocker_group_tbl_entry {
 	struct hlist_node entry;
+	u64 cookie;
 	u32 cmd;
 	u32 group_id; /* key */
 	u16 group_count;
@@ -2395,7 +2396,7 @@ static int rocker_flow_tbl_do(struct rocker_port *rocker_port,
 		return rocker_flow_tbl_add(rocker_port, entry, nowait);
 }
 
-static int rocker_flow_tbl_ig_port(struct rocker_port *rocker_port,
+static int rocker_flow_tbl_ig_port(struct rocker_port *rocker_port, u64 flow_id,
 				   int flags, u32 in_pport, u32 in_pport_mask,
 				   enum rocker_of_dpa_table_id goto_tbl)
 {
@@ -2411,11 +2412,14 @@ static int rocker_flow_tbl_ig_port(struct rocker_port *rocker_port,
 	entry->key.ig_port.in_pport_mask = in_pport_mask;
 	entry->key.ig_port.goto_tbl = goto_tbl;
 
+	if (flow_id)
+		entry->cookie = flow_id;
+
 	return rocker_flow_tbl_do(rocker_port, flags, entry);
 }
 
 static int rocker_flow_tbl_vlan(struct rocker_port *rocker_port,
-				int flags, u32 in_pport,
+				int flags, u64 flow_id, u32 in_pport,
 				__be16 vlan_id, __be16 vlan_id_mask,
 				enum rocker_of_dpa_table_id goto_tbl,
 				bool untagged, __be16 new_vlan_id)
@@ -2436,10 +2440,14 @@ static int rocker_flow_tbl_vlan(struct rocker_port *rocker_port,
 	entry->key.vlan.untagged = untagged;
 	entry->key.vlan.new_vlan_id = new_vlan_id;
 
+	if (flow_id)
+		entry->cookie = flow_id;
+
 	return rocker_flow_tbl_do(rocker_port, flags, entry);
 }
 
 static int rocker_flow_tbl_term_mac(struct rocker_port *rocker_port,
+				    u64 flow_id,
 				    u32 in_pport, u32 in_pport_mask,
 				    __be16 eth_type, const u8 *eth_dst,
 				    const u8 *eth_dst_mask, __be16 vlan_id,
@@ -2472,11 +2480,14 @@ static int rocker_flow_tbl_term_mac(struct rocker_port *rocker_port,
 	entry->key.term_mac.vlan_id_mask = vlan_id_mask;
 	entry->key.term_mac.copy_to_cpu = copy_to_cpu;
 
+	if (flow_id)
+		entry->cookie = flow_id;
+
 	return rocker_flow_tbl_do(rocker_port, flags, entry);
 }
 
 static int rocker_flow_tbl_bridge(struct rocker_port *rocker_port,
-				  int flags,
+				  int flags, u64 flow_id,
 				  const u8 *eth_dst, const u8 *eth_dst_mask,
 				  __be16 vlan_id, u32 tunnel_id,
 				  enum rocker_of_dpa_table_id goto_tbl,
@@ -2526,6 +2537,9 @@ static int rocker_flow_tbl_bridge(struct rocker_port *rocker_port,
 	entry->key.bridge.group_id = group_id;
 	entry->key.bridge.copy_to_cpu = copy_to_cpu;
 
+	if (flow_id)
+		entry->cookie = flow_id;
+
 	return rocker_flow_tbl_do(rocker_port, flags, entry);
 }
 
@@ -2555,7 +2569,7 @@ static int rocker_flow_tbl_ucast4_routing(struct rocker_port *rocker_port,
 }
 
 static int rocker_flow_tbl_acl(struct rocker_port *rocker_port,
-			       int flags, u32 in_pport,
+			       int flags, u64 flow_id, u32 in_pport,
 			       u32 in_pport_mask,
 			       const u8 *eth_src, const u8 *eth_src_mask,
 			       const u8 *eth_dst, const u8 *eth_dst_mask,
@@ -2602,6 +2616,9 @@ static int rocker_flow_tbl_acl(struct rocker_port *rocker_port,
 	entry->key.acl.ip_tos = ip_tos;
 	entry->key.acl.ip_tos_mask = ip_tos_mask;
 	entry->key.acl.group_id = group_id;
+
+	if (flow_id)
+		entry->cookie = flow_id;
 
 	return rocker_flow_tbl_do(rocker_port, flags, entry);
 }
@@ -2709,7 +2726,7 @@ static int rocker_group_tbl_do(struct rocker_port *rocker_port,
 }
 
 static int rocker_group_l2_interface(struct rocker_port *rocker_port,
-				     int flags, __be16 vlan_id,
+				     int flags, int flow_id, __be16 vlan_id,
 				     u32 out_pport, int pop_vlan)
 {
 	struct rocker_group_tbl_entry *entry;
@@ -2720,6 +2737,7 @@ static int rocker_group_l2_interface(struct rocker_port *rocker_port,
 
 	entry->group_id = ROCKER_GROUP_L2_INTERFACE(vlan_id, out_pport);
 	entry->l2_interface.pop_vlan = pop_vlan;
+	entry->cookie = flow_id;
 
 	return rocker_group_tbl_do(rocker_port, flags, entry);
 }
@@ -3064,7 +3082,7 @@ static int rocker_port_vlan_l2_groups(struct rocker_port *rocker_port,
 	if (rocker_port->stp_state == BR_STATE_LEARNING ||
 	    rocker_port->stp_state == BR_STATE_FORWARDING) {
 		out_pport = rocker_port->pport;
-		err = rocker_group_l2_interface(rocker_port, flags,
+		err = rocker_group_l2_interface(rocker_port, flags, 0,
 						vlan_id, out_pport,
 						pop_vlan);
 		if (err) {
@@ -3090,7 +3108,7 @@ static int rocker_port_vlan_l2_groups(struct rocker_port *rocker_port,
 		return 0;
 
 	out_pport = 0;
-	err = rocker_group_l2_interface(rocker_port, flags,
+	err = rocker_group_l2_interface(rocker_port, flags, 0,
 					vlan_id, out_pport,
 					pop_vlan);
 	if (err) {
@@ -3164,7 +3182,7 @@ static int rocker_port_ctrl_vlan_acl(struct rocker_port *rocker_port,
 	u32 group_id = ROCKER_GROUP_L2_INTERFACE(vlan_id, out_pport);
 	int err;
 
-	err = rocker_flow_tbl_acl(rocker_port, flags,
+	err = rocker_flow_tbl_acl(rocker_port, flags, 0,
 				  in_pport, in_pport_mask,
 				  eth_src, eth_src_mask,
 				  ctrl->eth_dst, ctrl->eth_dst_mask,
@@ -3193,7 +3211,7 @@ static int rocker_port_ctrl_vlan_bridge(struct rocker_port *rocker_port,
 	if (!rocker_port_is_bridged(rocker_port))
 		return 0;
 
-	err = rocker_flow_tbl_bridge(rocker_port, flags,
+	err = rocker_flow_tbl_bridge(rocker_port, flags, 0,
 				     ctrl->eth_dst, ctrl->eth_dst_mask,
 				     vlan_id, tunnel_id,
 				     goto_tbl, group_id, ctrl->copy_to_cpu);
@@ -3215,7 +3233,7 @@ static int rocker_port_ctrl_vlan_term(struct rocker_port *rocker_port,
 	if (ntohs(vlan_id) == 0)
 		vlan_id = rocker_port->internal_vlan_id;
 
-	err = rocker_flow_tbl_term_mac(rocker_port,
+	err = rocker_flow_tbl_term_mac(rocker_port, 0,
 				       rocker_port->pport, in_pport_mask,
 				       ctrl->eth_type, ctrl->eth_dst,
 				       ctrl->eth_dst_mask, vlan_id,
@@ -3329,7 +3347,7 @@ static int rocker_port_vlan(struct rocker_port *rocker_port, int flags,
 		return err;
 	}
 
-	err = rocker_flow_tbl_vlan(rocker_port, flags,
+	err = rocker_flow_tbl_vlan(rocker_port, flags, 0,
 				   in_pport, vlan_id, vlan_id_mask,
 				   goto_tbl, untagged, internal_vlan_id);
 	if (err)
@@ -3354,7 +3372,7 @@ static int rocker_port_ig_tbl(struct rocker_port *rocker_port, int flags)
 	in_pport_mask = 0xffff0000;
 	goto_tbl = ROCKER_OF_DPA_TABLE_ID_VLAN;
 
-	err = rocker_flow_tbl_ig_port(rocker_port, flags,
+	err = rocker_flow_tbl_ig_port(rocker_port, flags, 0,
 				      in_pport, in_pport_mask,
 				      goto_tbl);
 	if (err)
@@ -3410,7 +3428,7 @@ static int rocker_port_fdb_learn(struct rocker_port *rocker_port,
 		group_id = ROCKER_GROUP_L2_INTERFACE(vlan_id, out_pport);
 
 	if (!(flags & ROCKER_OP_FLAG_REFRESH)) {
-		err = rocker_flow_tbl_bridge(rocker_port, flags, addr, NULL,
+		err = rocker_flow_tbl_bridge(rocker_port, flags, 0, addr, NULL,
 					     vlan_id, tunnel_id, goto_tbl,
 					     group_id, copy_to_cpu);
 		if (err)
@@ -3545,7 +3563,7 @@ static int rocker_port_router_mac(struct rocker_port *rocker_port,
 		vlan_id = rocker_port->internal_vlan_id;
 
 	eth_type = htons(ETH_P_IP);
-	err = rocker_flow_tbl_term_mac(rocker_port,
+	err = rocker_flow_tbl_term_mac(rocker_port, 0,
 				       rocker_port->pport, in_pport_mask,
 				       eth_type, rocker_port->dev->dev_addr,
 				       dst_mac_mask, vlan_id, vlan_id_mask,
@@ -3554,7 +3572,7 @@ static int rocker_port_router_mac(struct rocker_port *rocker_port,
 		return err;
 
 	eth_type = htons(ETH_P_IPV6);
-	err = rocker_flow_tbl_term_mac(rocker_port,
+	err = rocker_flow_tbl_term_mac(rocker_port, 0,
 				       rocker_port->pport, in_pport_mask,
 				       eth_type, rocker_port->dev->dev_addr,
 				       dst_mac_mask, vlan_id, vlan_id_mask,
@@ -3589,7 +3607,7 @@ static int rocker_port_fwding(struct rocker_port *rocker_port)
 			continue;
 		vlan_id = htons(vid);
 		pop_vlan = rocker_vlan_id_is_internal(vlan_id);
-		err = rocker_group_l2_interface(rocker_port, flags,
+		err = rocker_group_l2_interface(rocker_port, flags, 0,
 						vlan_id, out_pport,
 						pop_vlan);
 		if (err) {
@@ -4269,7 +4287,7 @@ static int rocker_flow_set_ig_port(struct net_device *dev,
 	in_pport_mask = rule->matches[0].mask_u32;
 	goto_tbl = rocker_goto_value(rule->actions[0].args[0].value_u16);
 
-	return rocker_flow_tbl_ig_port(rocker_port, flags,
+	return rocker_flow_tbl_ig_port(rocker_port, flags, 0,
 				       in_pport, in_pport_mask,
 				       goto_tbl);
 }
@@ -4326,7 +4344,7 @@ static int rocker_flow_set_vlan(struct net_device *dev,
 		}
 	}
 
-	return rocker_flow_tbl_vlan(rocker_port, flags, in_pport,
+	return rocker_flow_tbl_vlan(rocker_port, flags, 0, in_pport,
 				    vlan_id, vlan_id_mask, goto_tbl,
 				    untagged, new_vlan_id);
 }
@@ -4406,7 +4424,8 @@ static int rocker_flow_set_term_mac(struct net_device *dev,
 		}
 	}
 
-	return rocker_flow_tbl_term_mac(rocker_port, in_pport, in_pport_mask,
+	return rocker_flow_tbl_term_mac(rocker_port, 0,
+					in_pport, in_pport_mask,
 					ethtype, eth_dst, eth_dst_mask,
 					vlan_id, vlan_id_mask,
 					copy_to_cpu, flags);
@@ -4495,7 +4514,7 @@ static int rocker_flow_set_bridge(struct net_device *dev,
 	}
 
 	/* Ignoring eth_dst_mask it seems to cause a EINVAL return code */
-	return rocker_flow_tbl_bridge(rocker_port, flags,
+	return rocker_flow_tbl_bridge(rocker_port, flags, 0,
 				      eth_dst, eth_dst_mask,
 				      vlan_id, tunnel_id,
 				      goto_tbl, group_id, copy_to_cpu);
@@ -4597,7 +4616,7 @@ static int rocker_flow_set_acl(struct net_device *dev,
 		}
 	}
 
-	return rocker_flow_tbl_acl(rocker_port, flags,
+	return rocker_flow_tbl_acl(rocker_port, flags, 0,
 				   in_pport, in_pport_mask,
 				   eth_src, eth_src_mask,
 				   eth_dst, eth_dst_mask, ethtype,
