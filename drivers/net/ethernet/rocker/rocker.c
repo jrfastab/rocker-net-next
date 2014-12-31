@@ -4287,7 +4287,7 @@ static int rocker_flow_set_ig_port(struct net_device *dev,
 	in_pport_mask = rule->matches[0].mask_u32;
 	goto_tbl = rocker_goto_value(rule->actions[0].args[0].value_u16);
 
-	return rocker_flow_tbl_ig_port(rocker_port, flags, 0,
+	return rocker_flow_tbl_ig_port(rocker_port, flags, rule->uid,
 				       in_pport, in_pport_mask,
 				       goto_tbl);
 }
@@ -4344,7 +4344,7 @@ static int rocker_flow_set_vlan(struct net_device *dev,
 		}
 	}
 
-	return rocker_flow_tbl_vlan(rocker_port, flags, 0, in_pport,
+	return rocker_flow_tbl_vlan(rocker_port, flags, rule->uid, in_pport,
 				    vlan_id, vlan_id_mask, goto_tbl,
 				    untagged, new_vlan_id);
 }
@@ -4424,7 +4424,7 @@ static int rocker_flow_set_term_mac(struct net_device *dev,
 		}
 	}
 
-	return rocker_flow_tbl_term_mac(rocker_port, 0,
+	return rocker_flow_tbl_term_mac(rocker_port, rule->uid,
 					in_pport, in_pport_mask,
 					ethtype, eth_dst, eth_dst_mask,
 					vlan_id, vlan_id_mask,
@@ -4514,7 +4514,7 @@ static int rocker_flow_set_bridge(struct net_device *dev,
 	}
 
 	/* Ignoring eth_dst_mask it seems to cause a EINVAL return code */
-	return rocker_flow_tbl_bridge(rocker_port, flags, 0,
+	return rocker_flow_tbl_bridge(rocker_port, flags, rule->uid,
 				      eth_dst, eth_dst_mask,
 				      vlan_id, tunnel_id,
 				      goto_tbl, group_id, copy_to_cpu);
@@ -4616,7 +4616,7 @@ static int rocker_flow_set_acl(struct net_device *dev,
 		}
 	}
 
-	return rocker_flow_tbl_acl(rocker_port, flags, 0,
+	return rocker_flow_tbl_acl(rocker_port, flags, rule->uid,
 				   in_pport, in_pport_mask,
 				   eth_src, eth_src_mask,
 				   eth_dst, eth_dst_mask, ethtype,
@@ -4676,6 +4676,8 @@ static int rocker_flow_set_group_slice_l3_unicast(struct net_device *dev,
 		}
 	}
 
+	entry->cookie = rule->uid;
+
 	return rocker_group_tbl_do(rocker_port, flags, entry);
 }
 
@@ -4727,6 +4729,8 @@ static int rocker_flow_set_group_slice_l2_rewrite(struct net_device *dev,
 		}
 	}
 
+	entry->cookie = rule->uid;
+
 	return rocker_group_tbl_do(rocker_port, flags, entry);
 }
 
@@ -4774,6 +4778,8 @@ static int rocker_flow_set_group_slice_l2(struct net_device *dev,
 			return -EINVAL;
 		}
 	}
+
+	entry->cookie = rule->uid;
 
 	return rocker_group_tbl_do(rocker_port, flags, entry);
 }
