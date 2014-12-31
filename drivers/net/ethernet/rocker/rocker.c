@@ -4830,7 +4830,51 @@ static int rocker_set_rules(struct net_device *dev,
 static int rocker_del_rules(struct net_device *dev,
 			    struct net_flow_rule *rule)
 {
-	return -EOPNOTSUPP;
+	struct rocker_port *rocker_port = netdev_priv(dev);
+	struct rocker_flow_tbl_entry *entry;
+	struct rocker_group_tbl_entry *group;
+	struct hlist_node *tmp;
+	int bkt, err = -EEXIST;
+	unsigned long flags;
+
+	spin_lock_irqsave(&rocker_port->rocker->flow_tbl_lock, flags);
+	hash_for_each_safe(rocker_port->rocker->flow_tbl,
+			   bkt, tmp, entry, entry) {
+		if (rocker_goto_value(rule->table_id) != entry->key.tbl_id ||
+		    rule->uid != entry->cookie)
+			continue;
+
+		hash_del(&entry->entry);
+		err = 0;
+		break;
+	}
+	spin_unlock_irqrestore(&rocker_port->rocker->flow_tbl_lock, flags);
+
+	if (!err)
+		goto done;
+
+	spin_lock_irqsave(&rocker_port->rocker->group_tbl_lock, flags);
+	hash_for_each_safe(rocker_port->rocker->group_tbl,
+			   bkt, tmp, group, entry) {
+		if (rocker_goto_value(rule->table_id) !=
+			ROCKER_GROUP_TYPE_GET(group->group_id) ||
+		    rule->uid != group->cookie)
+			continue;
+
+		hash_del(&group->entry);
+		err = 0;
+		break;
+	}
+	spin_unlock_irqrestore(&rocker_port->rocker->group_tbl_lock, flags);
+
+done:
+	if (!err) {
+		err = rocker_cmd_exec(rocker_port->rocker, rocker_port,
+				      rocker_cmd_flow_tbl_del,
+				      entry, NULL, NULL, true);
+		kfree(entry);
+	}
+	return err;
 }
 #endif
 
