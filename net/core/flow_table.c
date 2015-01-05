@@ -19,6 +19,7 @@
  */
 
 #include <uapi/linux/if_flow.h>
+#include <linux/if_flow_common.h>
 #include <linux/if_flow.h>
 #include <linux/if_bridge.h>
 #include <linux/types.h>
@@ -1620,6 +1621,63 @@ static int net_flow_del_rule_cache(struct net_flow_tbl *table,
 	return -EEXIST;
 }
 
+static int net_flow_is_valid_action(struct net_flow_action *a, int *actions)
+{
+	int i;
+
+	if (a->uid >= __ACTION_MAX)
+		return -EINVAL;
+
+	for (i = 0; actions[i]; i++) {
+		if (actions[i] == a->uid)
+			return 0;
+	}
+	return -EINVAL;
+}
+
+static int net_flow_is_valid_match(struct net_flow_field_ref *f,
+				   struct net_flow_field_ref *fields)
+{
+	int i;
+
+	for (i = 0; fields[i].header; i++) {
+		if (f->header == fields[i].header &&
+		    f->field == fields[i].field)
+			return 0;
+	}
+
+	return -EINVAL;
+}
+
+static int net_flow_is_valid_rule(struct net_flow_tbl *table,
+				  struct net_flow_rule *flow)
+{
+	struct net_flow_field_ref *fields = table->matches;
+	int *actions = table->actions;
+	int i, err;
+
+	/* Only accept rules with matches AND actions it does not seem
+	 * correct to allow a match without actions or action chains
+	 * that will never be hit
+	 */
+	if (!flow->actions || !flow->matches)
+		return -EINVAL;
+
+	for (i = 0; flow->actions[i].uid; i++) {
+		err = net_flow_is_valid_action(&flow->actions[i], actions);
+		if (err)
+			return -EINVAL;
+	}
+
+	for (i = 0; flow->matches[i].header; i++) {
+		err = net_flow_is_valid_match(&flow->matches[i], fields);
+		if (err)
+			return -EINVAL;
+	}
+
+	return 0;
+}
+
 static int net_flow_table_cmd_flows(struct sk_buff *recv_skb,
 				    struct genl_info *info)
 {
@@ -1690,6 +1748,9 @@ static int net_flow_table_cmd_flows(struct sk_buff *recv_skb,
 
 		switch (cmd) {
 		case NFL_TABLE_CMD_SET_FLOWS:
+			err = net_flow_is_valid_rule(table, this);
+			if (err)
+				break;
 			err = dev->netdev_ops->ndo_flow_set_rule(dev, this);
 			if (!err)
 				net_flow_add_rule_cache(table, this);
@@ -1810,11 +1871,101 @@ static const struct genl_ops net_flow_table_nl_ops[] = {
 	},
 };
 
+static int net_flow_is_valid_instance(__u32 instance,
+				      struct net_flow_hdr_node **graph)
+{
+	int i;
+
+	for (i = 0; graph[i]; i++) {
+		if (instance == graph[i]->uid)
+			return 0;
+	}
+
+	return -EINVAL;
+}
+
+static int net_flow_is_valid_tbl_act(struct net_flow_action **actions,
+				     __u32 action)
+{
+	int i;
+
+	for (i = 0; actions[i]->uid; i++) {
+		if (actions[i]->uid == action)
+			return 0;
+	}
+	return -EINVAL;
+}
+
+/* net_flow_validate_model is used to validate that the action set provided
+ * by the driver only contains well-formed actions. Well-formed actoins are
+ * actions that are either (a) pre-defined by if_flow_common.h or (b) are
+ * set_field actions that map to a field that is defined in the model.
+ *
+ * This also does a check on the tables exported to ensure the actions and
+ * headers used in the tables are defined by the model. This check ensures
+ * that when rules are inserted/removed the rule validation code correctly
+ * verifies the rules map to valid fields/actions.
+ */
+static int net_flow_validate_model(struct net_flow_switch_model *model)
+{
+	int err, i, j;
+
+	for (i = 0; model->actions[i]; i++) {
+		struct net_flow_action *a = model->actions[i];
+
+		/* If there is an instance value this is a a set_field action
+		 * and the instance needs to be checked against the hdr_graph
+		 */
+		if (a->instance) {
+			err = net_flow_is_valid_instance(a->instance,
+							 model->hdr_graph);
+			if (err)
+				return err;
+
+			if (a->uid < __ACTION_MAX)
+				return -EINVAL;
+		/* Otherwise it is a pre-defined action and must be defined
+		 * in the common include files
+		 */
+		} else if (a->uid >= __ACTION_MAX) {
+			return -EINVAL;
+		}
+	}
+
+	for (i = 0; model->tbls[i]; i++) {
+		struct net_flow_field_ref *matches = model->tbls[i]->matches;
+		__u32 *actions = model->tbls[i]->actions;
+
+		for (j = 0; matches[j].instance; j++) {
+			err = net_flow_is_valid_instance(matches[j].instance,
+							 model->hdr_graph);
+
+			if (err)
+				return -EINVAL;
+		}
+
+		for (j = 0; actions[j]; j++) {
+			err = net_flow_is_valid_tbl_act(model->actions,
+							actions[j]);
+
+			if (err)
+				return -EINVAL;
+		}
+	}
+
+	return 0;
+}
+
 int register_flow_table(struct net_device *dev,
 			struct net_flow_switch_model *model)
 {
 	struct list_head *head = &net_flow_models;
 	struct net_flow_model *m;
+	int err;
+
+	err = net_flow_validate_model(model);
+	if (err)
+		return -EINVAL;
 
 	spin_lock(&net_flow_models_lock);
 	list_for_each_entry(m, head, list) {
