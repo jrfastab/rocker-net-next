@@ -27,6 +27,10 @@
 #include <net/rtnetlink.h>
 #include <linux/module.h>
 #include <net/switchdev.h>
+#include <linux/rhashtable.h>
+#include <linux/jhash.h>
+
+static const struct rhashtable_params tsk_rht_params;
 
 struct net_flow_model {
 	struct list_head list;
@@ -919,6 +923,27 @@ static int net_flow_cmd_get_table_graph(struct sk_buff *skb,
 	return genlmsg_reply(msg, info);
 }
 
+static struct net_flow_tbl *net_flow_get_table(struct net_device *dev,
+					       int table_id)
+{
+	struct net_flow_switch_model *m;
+	struct net_flow_tbl **tables;
+	int i;
+
+	m = net_flow_get_model_by_dev(dev);
+	if (!m || !m->tbls)
+		return NULL;
+
+	tables = m->tbls;
+
+	for (i = 0; tables[i]; i++) {
+		if (tables[i]->uid == table_id)
+			return tables[i];
+	}
+
+	return NULL;
+}
+
 static int net_flow_put_flow_action(struct sk_buff *skb,
 				    struct net_flow_action *a)
 {
@@ -1017,11 +1042,39 @@ put_failure:
 	return err;
 }
 
+static int net_flow_get_rule_cache(struct sk_buff *skb,
+				   struct net_flow_tbl *table,
+				   int min, int max)
+{
+	const struct bucket_table *tbl;
+	struct net_flow_rule *he;
+	int i, err = 0;
+
+	rcu_read_lock();
+	tbl = rht_dereference_rcu(table->cache.tbl, &table->cache);
+
+	for (i = 0; i < tbl->size; i++) {
+		struct rhash_head *pos;
+
+		rht_for_each_entry_rcu(he, pos, tbl, i, node) {
+			if (he->uid < min || (max > 0 && he->uid > max))
+				continue;
+			err = net_flow_put_rule(skb, he);
+			if (err)
+				goto out;
+		}
+	}
+out:
+	rcu_read_unlock();
+	return err;
+}
+
 static struct sk_buff *net_flow_build_flows_msg(struct net_device *dev,
 						u32 portid, int seq, u8 cmd,
 						int min, int max, int table)
 {
 	struct genlmsghdr *hdr;
+	struct net_flow_tbl *t;
 	struct nlattr *flows;
 	struct sk_buff *skb;
 	int err = -ENOBUFS;
@@ -1030,6 +1083,7 @@ static struct sk_buff *net_flow_build_flows_msg(struct net_device *dev,
 	if (!skb)
 		return ERR_PTR(-ENOBUFS);
 
+	rcu_read_lock();
 	hdr = genlmsg_put(skb, portid, seq, &net_flow_nl_family, 0, cmd);
 	if (!hdr)
 		goto out;
@@ -1042,23 +1096,31 @@ static struct sk_buff *net_flow_build_flows_msg(struct net_device *dev,
 		goto out;
 	}
 
+	t = net_flow_get_table(dev, table);
+	if (!t) {
+		err = -EINVAL;
+		goto out;
+	}
+
 	flows = nla_nest_start(skb, NFL_FLOWS);
 	if (!flows) {
 		err = -EMSGSIZE;
 		goto out;
 	}
 
-	err = -EOPNOTSUPP;
-	if (err < 0)
-		goto out_cancel;
+	err = net_flow_get_rule_cache(skb, t, min, max);
+	if (err < 0) {
+		nla_nest_cancel(skb, flows);
+		goto out;
+	}
 
 	nla_nest_end(skb, flows);
 
 	genlmsg_end(skb, hdr);
+	rcu_read_unlock();
 	return skb;
-out_cancel:
-	nla_nest_cancel(skb, flows);
 out:
+	rcu_read_unlock();
 	nlmsg_free(skb);
 	return ERR_PTR(err);
 }
@@ -1283,6 +1345,13 @@ static void net_flow_rule_free(struct net_flow_rule *rule)
 	kfree(rule);
 }
 
+static void net_flow_rule_free_rcu(struct rcu_head *head)
+{
+	struct net_flow_rule *r = container_of(head, struct net_flow_rule, rcu);
+
+	net_flow_rule_free(r);
+}
+
 static const
 struct nla_policy net_flow_actarg_policy[NFL_ACTION_ARG_MAX + 1] = {
 	[NFL_ACTION_ARG_NAME]  = { .type = NLA_STRING },
@@ -1488,6 +1557,69 @@ static int net_flow_get_rule(struct net_flow_rule *rule, struct nlattr *attr)
 	return 0;
 }
 
+#define NFL_TABLE_ELEM_HINT 10
+int net_flow_init_cache(struct net_flow_tbl *table)
+{
+	struct rhashtable_params params = {
+		.nelem_hint = NFL_TABLE_ELEM_HINT,
+		.head_offset = offsetof(struct net_flow_rule, node),
+		.key_offset = offsetof(struct net_flow_rule, uid),
+		.key_len = sizeof(__u32),
+		.hashfn = jhash,
+	};
+
+	return rhashtable_init(&table->cache, &params);
+}
+EXPORT_SYMBOL(net_flow_init_cache);
+
+void net_flow_destroy_cache(struct net_flow_tbl *table)
+{
+	struct rhashtable *cache = &table->cache;
+	const struct bucket_table *tbl;
+	struct net_flow_rule *he;
+	struct rhash_head *pos, *next;
+	unsigned int i;
+
+	/* Stop an eventual async resizing */
+	mutex_lock(&cache->mutex);
+
+	tbl = rht_dereference(cache->tbl, cache);
+	for (i = 0; i < tbl->size; i++) {
+		rht_for_each_entry_safe(he, pos, next, tbl, i, node) {
+			rhashtable_remove_fast(&table->cache, &he->node,
+					       tsk_rht_params);
+			call_rcu(&he->rcu, net_flow_rule_free_rcu);
+		}
+	}
+
+	mutex_unlock(&cache->mutex);
+	rhashtable_destroy(cache);
+}
+EXPORT_SYMBOL(net_flow_destroy_cache);
+
+static void net_flow_add_rule_cache(struct net_flow_tbl *table,
+				    struct net_flow_rule *this)
+{
+	rhashtable_insert_fast(&table->cache, &this->node, tsk_rht_params);
+}
+
+static int net_flow_del_rule_cache(struct net_flow_tbl *table,
+				   struct net_flow_rule *this)
+{
+	struct net_flow_rule *he;
+
+	he = rhashtable_lookup_fast(&table->cache, &this->uid, tsk_rht_params);
+	if (he) {
+		rhashtable_remove_fast(&table->cache, &he->node,
+				       tsk_rht_params);
+		synchronize_rcu();
+		net_flow_rule_free(he);
+		return 0;
+	}
+
+	return -EEXIST;
+}
+
 static int net_flow_table_cmd_flows(struct sk_buff *recv_skb,
 				    struct genl_info *info)
 {
@@ -1529,6 +1661,8 @@ static int net_flow_table_cmd_flows(struct sk_buff *recv_skb,
 
 	net_flow_lock();
 	nla_for_each_nested(flow, info->attrs[NFL_FLOWS], rem) {
+		struct net_flow_tbl *table;
+
 		if (nla_type(flow) != NFL_FLOW)
 			continue;
 
@@ -1546,17 +1680,30 @@ static int net_flow_table_cmd_flows(struct sk_buff *recv_skb,
 		if (err)
 			goto out_locked;
 
+		rcu_read_lock();
+		table = net_flow_get_table(dev, this->table_id);
+		if (!table) {
+			rcu_read_unlock();
+			err = -EINVAL;
+			goto skip;
+		}
+
 		switch (cmd) {
 		case NFL_TABLE_CMD_SET_FLOWS:
 			err = dev->netdev_ops->ndo_flow_set_rule(dev, this);
+			if (!err)
+				net_flow_add_rule_cache(table, this);
 			break;
 		case NFL_TABLE_CMD_DEL_FLOWS:
 			err = dev->netdev_ops->ndo_flow_del_rule(dev, this);
+			if (!err)
+				err = net_flow_del_rule_cache(table, this);
 			break;
 		default:
 			err = -EOPNOTSUPP;
 			break;
 		}
+		rcu_read_unlock();
 
 skip:
 		if (err && err_handle != NFL_FLOWS_ERROR_CONTINUE) {
@@ -1579,8 +1726,6 @@ skip:
 
 			net_flow_put_rule(skb, this);
 		}
-
-		net_flow_rule_free(this);
 
 		if (err && err_handle == NFL_FLOWS_ERROR_ABORT)
 			goto out_locked;

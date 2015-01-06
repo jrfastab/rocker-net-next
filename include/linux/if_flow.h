@@ -21,6 +21,7 @@
 #define _IF_FLOW_H
 
 #include <uapi/linux/if_flow.h>
+#include <linux/rhashtable.h>
 
 /**
  * @struct net_flow_fields
@@ -136,6 +137,7 @@ struct net_flow_field_ref {
  * @size max number of entries for table or -1 for unbounded
  * @matches null terminated set of supported match types given by match uid
  * @actions null terminated set of supported action types given by action uid
+ * @cache software cache of hardware flows
  */
 struct net_flow_tbl {
 	char *name;
@@ -145,6 +147,7 @@ struct net_flow_tbl {
 	__u32 size;
 	struct net_flow_field_ref *matches;
 	__u32 *actions;
+	struct rhashtable cache;
 };
 
 /**
@@ -214,6 +217,8 @@ int unregister_flow_table(struct net_device *dev);
  * @struct net_flow_rule
  * @brief describes the match/action entry
  *
+ * @node node for resizable hash table used for software cache of rules
+ * @rcu used to support delayed freeing via call_rcu in software cache
  * @uid unique identifier for flow
  * @priority priority to execute flow match/action in table
  * @match null terminated set of match uids match criteria
@@ -222,10 +227,29 @@ int unregister_flow_table(struct net_device *dev);
  * Flows must match all entries in match set.
  */
 struct net_flow_rule {
+	struct rhash_head node;
+	struct rcu_head rcu;
 	__u32 table_id;
 	__u32 uid;
 	__u32 priority;
 	struct net_flow_field_ref *matches;
 	struct net_flow_action *actions;
 };
+
+#ifdef CONFIG_NET_FLOW_TABLES
+int net_flow_init_cache(struct net_flow_tbl *table);
+void net_flow_destroy_cache(struct net_flow_tbl *table);
+#else
+static inline int
+net_flow_init_cache(struct net_flow_tbl *table)
+{
+	return 0;
+}
+
+static inline void
+net_flow_destroy_cache(struct net_flow_tbl *table)
+{
+	return;
+}
+#endif /* CONFIG_NET_FLOW_TABLES */
 #endif /* _IF_FLOW_H_ */
