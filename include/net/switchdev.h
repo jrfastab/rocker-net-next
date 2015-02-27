@@ -68,6 +68,7 @@ netdev_switch_notifier_info_to_dev(const struct netdev_switch_notifier_info *inf
 
 int netdev_switch_parent_id_get(struct net_device *dev,
 				struct netdev_phys_item_id *psid);
+int netdev_switch_parent_id_eq(struct net_device *a, struct net_device *b);
 int netdev_switch_port_stp_update(struct net_device *dev, u8 state);
 int register_netdev_switch_notifier(struct notifier_block *nb);
 int unregister_netdev_switch_notifier(struct notifier_block *nb);
@@ -91,6 +92,12 @@ void netdev_switch_fib_ipv4_abort(struct fib_info *fi);
 
 static inline int netdev_switch_parent_id_get(struct net_device *dev,
 					      struct netdev_phys_item_id *psid)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline
+int netdev_switch_parent_id_eq(struct net_device *a, struct net_device *b)
 {
 	return -EOPNOTSUPP;
 }

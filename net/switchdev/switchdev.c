@@ -37,6 +37,39 @@ int netdev_switch_parent_id_get(struct net_device *dev,
 EXPORT_SYMBOL_GPL(netdev_switch_parent_id_get);
 
 /**
+ *	netdev_switch_parent_id_eq - Compare switch ID
+ *	@a: net device to compare against
+ *	@b: net device to compare against
+ *
+ *	Returns 0 if matching, > 0 if not matching and < 0 on error
+ */
+int netdev_switch_parent_id_eq(struct net_device *a, struct net_device *b)
+{
+	struct netdev_phys_item_id aid, bid;
+	int i, err;
+
+	err = netdev_switch_parent_id_get(a, &aid);
+	if (err)
+		return err;
+
+	err = netdev_switch_parent_id_get(a, &bid);
+	if (err)
+		return err;
+
+	if (aid.id_len != bid.id_len)
+		return aid.id_len > bid.id_len ? aid.id_len - bid.id_len :
+						 bid.id_len - aid.id_len;
+
+	for (i = 0; i < aid.id_len; i++) {
+		if (aid.id[i] != aid.id[i])
+			return i;
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL(netdev_switch_parent_id_eq);
+
+/**
  *	netdev_switch_port_stp_update - Notify switch device port of STP
  *					state change
  *	@dev: port device
